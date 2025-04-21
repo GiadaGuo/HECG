@@ -676,7 +676,7 @@ class ECGTransform:
 
         # warp the window
         warped_len = int(win_len * warp_ratio) #变形后窗口长度：片段变形，采样点数改变
-        window = signal[start:end]
+        window = signal[start:end] #从 signal 中提取从索引 start 到索引 end - 1 的行，而列保持不变
 
         warped_window = np.stack([
             np.interp(

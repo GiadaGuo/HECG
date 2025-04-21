@@ -276,7 +276,7 @@ class VisionTransformer(nn.Module):
 
     def prepare_tokens(self, x):
         B, nc, w, h = x.shape #x:(128,12,1,160)
-        x = self.patch_embed(x)  # patch linear embedding:(128,4,384)
+        x = self.slice_embed(x)  # patch linear embedding:(128,4,384)
 
         # add the [CLS] token to the embed patch tokens
         cls_tokens = self.cls_token.expand(B, -1, -1) #cls_tokens：(128,1,384)
