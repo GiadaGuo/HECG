@@ -175,14 +175,21 @@ def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
 
 def cosine_scheduler(base_value, final_value, epochs, niter_per_ep, warmup_epochs=0, start_warmup_value=0):
     warmup_schedule = np.array([])
-    warmup_iters = warmup_epochs * niter_per_ep
+    warmup_iters = warmup_epochs * niter_per_ep # niter_per_ep输入是len(data_loader)即batch_size
+
+    # warmup部分，学习率线性上升
     if warmup_epochs > 0:
         warmup_schedule = np.linspace(start_warmup_value, base_value, warmup_iters)
 
+    # cosine部分的step数量（排除warmup的）
     iters = np.arange(epochs * niter_per_ep - warmup_iters)
+    # cosine schedule：从base_value缓慢下降到final_value
     schedule = final_value + 0.5 * (base_value - final_value) * (1 + np.cos(np.pi * iters / len(iters)))
 
+    # 合并两个阶段(warm和正常训练)的schedule
     schedule = np.concatenate((warmup_schedule, schedule))
+    #len(schedule)与
+    #epochs * niter_per_ep=5*(样本量//batch_size)=320(epochs来自外部传参，niter_per_ep是样本中的总batch数)=模型总共看的样本数
     assert len(schedule) == epochs * niter_per_ep
     return schedule
 

@@ -299,8 +299,8 @@ def train_dino(args):
     lr_schedule = utils.cosine_scheduler(
         args.lr * (args.batch_size_per_gpu * utils.get_world_size()) / 256.,  # linear scaling rule
         args.min_lr,
-        args.epochs, len(data_loader), #len(data_loader)：每个 epoch 的迭代次数
-        warmup_epochs=args.warmup_epochs,
+        args.epochs, len(data_loader), #len(data_loader)：每个 epoch 的迭代次数，这里是2500/64=39次（没整除）
+        warmup_epochs=args.warmup_epochs, #默认是10
     )
 
     #初始化权重衰减调度器
@@ -677,16 +677,26 @@ class ECGTransform:
         # warp the window
         warped_len = int(win_len * warp_ratio) #变形后窗口长度：片段变形，采样点数改变
         window = signal[start:end]
-        warped_window = np.interp( #对window数组每列进行插值，使其长度变为warped_len
-            np.linspace(0, win_len - 1, warped_len), #插值x坐标：生成一个从0到win_len - 1的等差数列，总共有warped_len个数
-            np.arange(win_len), #原窗口x坐标：生成一个从0到win_len - 1的整数数组
-            window.T #需要插值的原始窗口数据
-        ).T  # (warped_len, C)
+
+        warped_window = np.stack([
+            np.interp(
+                np.linspace(0, win_len - 1, warped_len),#插值x坐标：生成一个从0到win_len - 1的等差数列，总共有warped_len个数
+                np.arange(win_len), #原窗口x坐标：生成一个从0到win_len - 1的整数数组
+                window[:, i]
+            )
+            for i in range(window.shape[1])
+        ], axis=1)  # 最后输出为 (warped_len, 12)
+
 
         # interpolate back to original length
-        warped_back = np.interp(
-            np.linspace(0, warped_len - 1, win_len), np.arange(warped_len), warped_window.T
-        ).T
+        warped_back = np.stack([
+            np.interp(
+                np.linspace(0, warped_len - 1, win_len),  # 目标插值位置（回到原始 win_len）
+                np.arange(warped_len),  # 当前的采样点位置
+                warped_window[:, i]  # 当前通道的一维数据
+            )
+            for i in range(warped_window.shape[1])  # 对每个通道做
+        ], axis=1)  # 拼接回二维，shape=(win_len, 12)
 
         # replace the original window
         new_signal = np.copy(signal)
