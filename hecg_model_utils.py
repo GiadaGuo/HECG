@@ -29,8 +29,8 @@ import torch.multiprocessing
 from einops import rearrange, repeat
 torch.multiprocessing.set_sharing_strategy('file_system')
 
-from numpy.core.multiarray import scalar
-from torch.serialization import safe_globals
+from numpy.core import multiarray
+torch.serialization.add_safe_globals([multiarray.scalar,np.dtype,np.dtypes.Float64DType,argparse.Namespace])
 
 # Local Dependencies
 import ecg_vit1 as vits
@@ -59,7 +59,7 @@ def get_vit200(pretrained_weights, arch='vit_small', device=torch.device('cuda:0
     model200.to(device)
 
     if os.path.isfile(pretrained_weights):
-        with torch.serialization.safe_globals([np._core.multiarray.scalar]):
+        with torch.serialization.safe_globals([multiarray.scalar,np.dtype,np.dtypes.Float64DType,argparse.Namespace]):
             state_dict = torch.load(pretrained_weights, map_location="cpu",weights_only=False)
         if checkpoint_key is not None and checkpoint_key in state_dict:
             print(f"Take key {checkpoint_key} in provided checkpoint dict")
