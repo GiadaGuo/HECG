@@ -52,10 +52,10 @@ def get_args_parser():
         #         + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
-    parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
-        of input square patches - default 16 (for 16x16 patches). Using smaller
+    parser.add_argument('--slice_len', default=40, type=int, help="""Sampling points
+        of input series - default 40 (for 40 slices). Using smaller
         values leads to better performance but requires more memory. Applies only
-        for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
+        for ViTs (vit_tiny, vit_small and vit_base). If <40, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
     parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
         the DINO head output. For complex and large datasets large values (like 65k) work well.""")
@@ -184,10 +184,10 @@ def train_dino(args):
     # if the network is a Vision Transformer (i.e. vit_tiny, vit_small, vit_base)
     if args.arch in vits.__dict__.keys(): #vits.__dict__.keys() 返回一个包含模块中所有属性和方法名称的列表
         student = vits.__dict__[args.arch]( #调用相应结构： vit_tiny/vit_small/vit_base
-            patch_size=args.patch_size,
+            slice_len=args.slice_len,
             drop_path_rate=args.drop_path_rate,  # stochastic depth（在训练过程中，每个残差分支有 drop_path_rate 的概率被丢弃）
         )
-        teacher = vits.__dict__[args.arch](patch_size=args.patch_size)
+        teacher = vits.__dict__[args.arch](slice_len=args.slice_len)
         embed_dim = student.embed_dim #根据不同VIT默认值不同，vit_small是384
 
     # 这个模型暂时没用上

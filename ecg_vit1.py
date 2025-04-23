@@ -179,7 +179,7 @@ class Block(nn.Module):
 class SliceEmbed(nn.Module):
     """
     ECG series to Slice Embedding
-    参数来自VIT传入: img_size=img_size[0], patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim
+    参数来自VIT传入: series_len=series_len[0], slice_len=slice_len, in_chans=in_chans, embed_dim=embed_dim
 
     input:(B, 12, 1, L),e.g.(128,12,1,160)
     output:  e.g.(128,4,embed_dim)
@@ -207,17 +207,22 @@ class VisionTransformer(nn.Module):
     以global view为例
     传入数据:images[:2]由MultiCropWrapper处理后的(128,12,1,160)
 
-    """
-    #3个实例vit_tiny,vit_small,vit_base给的embed_dim默认值不同
+    实例传参示例——3个实例vit_tiny,vit_small,vit_base给的embed_dim默认值不同：
+     model = VisionTransformer(
+        slice_len=slice_len, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
+        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
 
-    def __init__(self, img_size=[224], slice_size=40, in_chans=12, num_classes=0, embed_dim=768, depth=12,
+    """
+
+
+    def __init__(self, series_len=[160], slice_len=40, in_chans=12, num_classes=0, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
                  drop_path_rate=0., norm_layer=nn.LayerNorm, **kwargs):
         super().__init__()
         self.num_features = self.embed_dim = embed_dim
 
         self.slice_embed = SliceEmbed(
-            series_len=img_size[0], slice_len=slice_size, in_chans=in_chans, embed_dim=embed_dim)
+            series_len=series_len[0], slice_len=slice_len, in_chans=in_chans, embed_dim=embed_dim)
         num_slices = self.slice_embed.num_slices
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) #0张量：(1,1,384)
@@ -249,6 +254,13 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.weight, 1.0)
 
     def interpolate_pos_encoding(self, x, h,w=1): #x:(128,5,384),w:1,h:160
+        """
+        位置编码之前根据160采样点计算
+        80采样点和后续输入的200采样点对应算出的nslice和N不等，要重新插值
+
+        nslice：实际输入的slice数
+        N：160采样点下的slice数
+        """
         nslice = x.shape[1] - 1 #nslice:4
         N = self.pos_embed.shape[1] - 1 #N:4
         if nslice == N:
@@ -260,7 +272,7 @@ class VisionTransformer(nn.Module):
 
         # we add a small number to avoid floating point error in the interpolation
         # see discussion at https://github.com/facebookresearch/dino/issues/8
-        h0 = h // self.slice_embed.slice_len + 0.1
+        h0 = h // self.slice_embed.slice_len + 0.1 #e.g.h0=80//40+0.1=2.1，h0是实际采样点对应的num_slices
 
         #interpolate: (1, N, dim) -> (1, dim, N) -> interpolate -> (1, dim, new_h)
         slice_pos_embed = nn.functional.interpolate(
@@ -315,23 +327,23 @@ class VisionTransformer(nn.Module):
         return output
 
 
-def vit_tiny(patch_size=16, **kwargs):
+def vit_tiny(slice_len=40, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
+        slice_len=slice_len, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 
-def vit_small(patch_size=16, **kwargs):
+def vit_small(slice_len=40, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
+        slice_len=slice_len, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 
 
-def vit_base(patch_size=16, **kwargs):
+def vit_base(slice_len=40, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
+        slice_len=slice_len, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model
 

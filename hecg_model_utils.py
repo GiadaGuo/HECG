@@ -36,25 +36,25 @@ import ecg_vit2 as vits4k
 
 def get_vit200(pretrained_weights, arch='vit_small', device=torch.device('cuda:0')):
     r"""
-    Builds ViT-256 Model.
+    Builds ViT-200 Model.
     
     Args:
-    - pretrained_weights (str): Path to ViT-256 Model Checkpoint.
+    - pretrained_weights (str): Path to ViT-200 Model Checkpoint.
     - arch (str): Which model architecture.
     - device (torch): Torch device to save model.
     
     Returns:
-    - model256 (torch.nn): Initialized model.
+    - model200 (torch.nn): Initialized model.
     """
     
     checkpoint_key = 'teacher' #通过预训练最终使用教师模型
     device = torch.device("cpu")
     #根据变量arch的值(arch='vit_small')，动态地从vits模块或类中获取对应的模型类或函数，然后创建这个模型的一个实例
-    model256 = vits.__dict__[arch](patch_size=16, num_classes=0)
-    for p in model256.parameters():
+    model200 = vits.__dict__[arch](patch_size=16, num_classes=0)
+    for p in model200.parameters():
         p.requires_grad = False
-    model256.eval()
-    model256.to(device)
+    model200.eval()
+    model200.to(device)
 
     if os.path.isfile(pretrained_weights):
         state_dict = torch.load(pretrained_weights, map_location="cpu")
