@@ -17,8 +17,7 @@ from matplotlib.patches import Polygon
 import numpy as np
 
 from scipy.stats import rankdata
-import skimage.io
-from skimage.measure import find_contours
+
 from tqdm import tqdm
 import webdataset as wds
 
@@ -29,6 +28,9 @@ import torch.multiprocessing
 
 from einops import rearrange, repeat
 torch.multiprocessing.set_sharing_strategy('file_system')
+
+from numpy.core.multiarray import scalar
+from torch.serialization import safe_globals
 
 # Local Dependencies
 import ecg_vit1 as vits
@@ -50,14 +52,15 @@ def get_vit200(pretrained_weights, arch='vit_small', device=torch.device('cuda:0
     checkpoint_key = 'teacher' #通过预训练最终使用教师模型
     device = torch.device("cpu")
     #根据变量arch的值(arch='vit_small')，动态地从vits模块或类中获取对应的模型类或函数，然后创建这个模型的一个实例
-    model200 = vits.__dict__[arch](patch_size=16, num_classes=0)
+    model200 = vits.__dict__[arch](slice_len=40, num_classes=0)
     for p in model200.parameters():
         p.requires_grad = False
     model200.eval()
     model200.to(device)
 
     if os.path.isfile(pretrained_weights):
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
+        with torch.serialization.safe_globals([np._core.multiarray.scalar]):
+            state_dict = torch.load(pretrained_weights, map_location="cpu",weights_only=False)
         if checkpoint_key is not None and checkpoint_key in state_dict:
             print(f"Take key {checkpoint_key} in provided checkpoint dict")
             state_dict = state_dict[checkpoint_key]
@@ -65,10 +68,10 @@ def get_vit200(pretrained_weights, arch='vit_small', device=torch.device('cuda:0
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         # remove `backbone.` prefix induced by multicrop wrapper
         state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
-        msg = model256.load_state_dict(state_dict, strict=False)
+        msg = model200.load_state_dict(state_dict, strict=False)
         print('Pretrained weights found at {} and loaded with msg: {}'.format(pretrained_weights, msg))
         
-    return model256
+    return model200
 
 
 def get_vit4k(pretrained_weights, arch='vit4k_xs', device=torch.device('cuda:1')):
@@ -119,37 +122,37 @@ def eval_transforms(signal):
     return eval_t
 
 
-def roll_batch2img(batch: torch.Tensor, w: int, h: int, patch_size=256):
-	"""
-	Rolls an image tensor batch (batch of [256 x 256] images) into a [W x H] Pil.Image object.
-	
-	Args:
-		batch (torch.Tensor): [B x 3 x 256 x 256] image tensor batch.
-		
-	Return:
-		Image.PIL: [W x H X 3] Image.
-	"""
-	batch = batch.reshape(w, h, 3, patch_size, patch_size)
-	img = rearrange(batch, 'p1 p2 c w h-> c (p1 w) (p2 h)').unsqueeze(dim=0)
-	return Image.fromarray(tensorbatch2im(img)[0])
-
-
-def tensorbatch2im(input_image, imtype=np.uint8):
-    r""""
-    Converts a Tensor array into a numpy image array.
-    
-    Args:
-        - input_image (torch.Tensor): (B, C, W, H) Torch Tensor.
-        - imtype (type): the desired type of the converted numpy array
-        
-    Returns:
-        - image_numpy (np.array): (B, W, H, C) Numpy Array.
-    """
-    if not isinstance(input_image, np.ndarray):
-        image_numpy = input_image.cpu().float().numpy()  # convert it into a numpy array
-        #if image_numpy.shape[0] == 1:  # grayscale to RGB
-        #    image_numpy = np.tile(image_numpy, (3, 1, 1))
-        image_numpy = (np.transpose(image_numpy, (0, 2, 3, 1)) + 1) / 2.0 * 255.0  # post-processing: tranpose and scaling
-    else:  # if it is a numpy array, do nothing
-        image_numpy = input_image
-    return image_numpy.astype(imtype)
+# def roll_batch2img(batch: torch.Tensor, w: int, h: int, patch_size=256):
+# 	"""
+# 	Rolls an image tensor batch (batch of [256 x 256] images) into a [W x H] Pil.Image object.
+#
+# 	Args:
+# 		batch (torch.Tensor): [B x 3 x 256 x 256] image tensor batch.
+#
+# 	Return:
+# 		Image.PIL: [W x H X 3] Image.
+# 	"""
+# 	batch = batch.reshape(w, h, 3, patch_size, patch_size)
+# 	img = rearrange(batch, 'p1 p2 c w h-> c (p1 w) (p2 h)').unsqueeze(dim=0)
+# 	return Image.fromarray(tensorbatch2im(img)[0])
+#
+#
+# def tensorbatch2im(input_image, imtype=np.uint8):
+#     r""""
+#     Converts a Tensor array into a numpy image array.
+#
+#     Args:
+#         - input_image (torch.Tensor): (B, C, W, H) Torch Tensor.
+#         - imtype (type): the desired type of the converted numpy array
+#
+#     Returns:
+#         - image_numpy (np.array): (B, W, H, C) Numpy Array.
+#     """
+#     if not isinstance(input_image, np.ndarray):
+#         image_numpy = input_image.cpu().float().numpy()  # convert it into a numpy array
+#         #if image_numpy.shape[0] == 1:  # grayscale to RGB
+#         #    image_numpy = np.tile(image_numpy, (3, 1, 1))
+#         image_numpy = (np.transpose(image_numpy, (0, 2, 3, 1)) + 1) / 2.0 * 255.0  # post-processing: tranpose and scaling
+#     else:  # if it is a numpy array, do nothing
+#         image_numpy = input_image
+#     return image_numpy.astype(imtype)
