@@ -207,8 +207,8 @@ class VisionTransformer1K(nn.Module):
         num_slices = int(series_len[0] // 40) #比例一致故算出来还是4
         print("# of Slices:", num_slices)
         
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) #(1,1,384)
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_slices + 1, embed_dim)) #(1,4+1,384)->(1,5,384)
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) #(1,1,192)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_slices + 1, embed_dim)) #(1,4+1,192)->(1,5,192)
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
@@ -235,36 +235,18 @@ class VisionTransformer1K(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    # def interpolate_pos_encoding(self, x, w, h):
-    #     """
-    #     x:(100, 5, 192)
-    #     w:1
-    #     h:4
-    #     这里应该没有采样点不一致的问题了，是不是没有必要了
-    #     """
-    #
-    #     return self.pos_embed
-    #
-    #     nslice = x.shape[1] - 1 #nslice:4
-    #     N = self.pos_embed.shape[1] - 1 #N:4
-    #     if nslice == N:
-    #         return self.pos_embed
-    #     class_pos_embed = self.pos_embed[:, 0]
-    #     patch_pos_embed = self.pos_embed[:, 1:]
-    #     dim = x.shape[-1]
-    #     w0 = w // 1
-    #     h0 = h // 1
-    #     # we add a small number to avoid floating point error in the interpolation
-    #     # see discussion at https://github.com/facebookresearch/dino/issues/8
-    #     w0, h0 = w0 + 0.1, h0 + 0.1
-    #     patch_pos_embed = nn.functional.interpolate(
-    #         patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
-    #         scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
-    #         mode='bicubic',
-    #     )
-    #     assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
-    #     patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-    #     return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+    def pos_encoding(self, x):
+        """
+        x:(100, 5, 192)
+        w:1
+        h:4
+        这里global的4和local的2仍然会不一致
+        """
+        nslice = x.shape[1] - 1 #global时nslice=4;local时nslice=2，即nslice与N不一定相等的
+        N = self.pos_embed.shape[1] - 1 #N:4
+        if nslice == N:
+            return self.pos_embed #维度一定是(1,5,192)
+        return nn.Parameter(torch.zeros(1, nslice, self.embed_dim))
 
     def prepare_tokens(self, x):
         #print('preparing tokens (after crop)', x.shape)
@@ -281,7 +263,9 @@ class VisionTransformer1K(nn.Module):
         x = torch.cat((cls_tokens, x), dim=1) #(100, 5, 192)
 
         # add positional encoding to each token
-        x = x + self.pos_embed #原来是interpolate_pos_encoding(self, x, w, h)但好像不会有插值情况了
+        # self.pos_embed维度一定是(1,5,384)
+        # x目前可能会是(100,2,192)...这里得调整一下self.pos_embed使维度适配
+        x = x + self.pos_encoding(x) #原来是interpolate_pos_encoding(self, x, w, h);#x:(100,5,384)+(1,5,384)->广播->(100,5,384)
 
         return self.pos_drop(x) #输出维度(100, 5, 192)
 
