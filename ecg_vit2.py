@@ -246,7 +246,7 @@ class VisionTransformer1K(nn.Module):
         N = self.pos_embed.shape[1] - 1 #N:4
         if nslice == N:
             return self.pos_embed #维度一定是(1,5,192)
-        return nn.Parameter(torch.zeros(1, nslice, self.embed_dim))
+        return nn.Parameter(torch.zeros(1, nslice+1, self.embed_dim,device=self.pos_embed.device)) #(1,3,192)
 
     def prepare_tokens(self, x):
         #print('preparing tokens (after crop)', x.shape)
