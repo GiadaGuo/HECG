@@ -18,6 +18,7 @@ import datetime
 import time
 import math
 import json
+import random
 from pathlib import Path
 
 import numpy as np
@@ -27,33 +28,34 @@ import torch.nn as nn
 import torch.distributed as dist
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
-from torchvision import datasets, transforms
-from torchvision import models as torchvision_models
+
 from torch.utils.data.dataset import Dataset
 
 import utils
-import vision_transformer4k as vits
-from vision_transformer4k import DINOHead
+import ecg_utils
+
+import ecg_vit2 as vits
+from ecg_vit2 import DINOHead
 
 from einops import rearrange, repeat, reduce
 
-torchvision_archs = sorted(name for name in torchvision_models.__dict__
-    if name.islower() and not name.startswith("__")
-    and callable(torchvision_models.__dict__[name]))
+# torchvision_archs = sorted(name for name in torchvision_models.__dict__
+#     if name.islower() and not name.startswith("__")
+#     and callable(torchvision_models.__dict__[name]))
 
 def get_args_parser():
     parser = argparse.ArgumentParser('DINO4K', add_help=False)
 
     # Model parameters
     parser.add_argument('--arch', default='vit_xs', type=str,
-        choices=['vit4k_xs', 'vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'] \
-                + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
+        choices=['vit4k_xs', 'vit_tiny', 'vit_small', 'vit_base', 'xcit', 'deit_tiny', 'deit_small'],
+                # + torchvision_archs + torch.hub.list("facebookresearch/xcit:main"),
         help="""Name of architecture to train. For quick experiments with ViTs,
         we recommend using vit_tiny or vit_small.""")
-    parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels
-        of input square patches - default 16 (for 16x16 patches). Using smaller
+    parser.add_argument('--slice_len', default=40, type=int, help="""Sampling points
+        of input series - default 40 (for 40 slices). Using smaller
         values leads to better performance but requires more memory. Applies only
-        for ViTs (vit_tiny, vit_small and vit_base). If <16, we recommend disabling
+        for ViTs (vit_tiny, vit_small and vit_base). If <40, we recommend disabling
         mixed precision training (--use_fp16 false) to avoid unstabilities.""")
     parser.add_argument('--out_dim', default=65536, type=int, help="""Dimensionality of
         the DINO head output. For complex and large datasets large values (like 65k) work well.""")
@@ -90,7 +92,7 @@ def get_args_parser():
     parser.add_argument('--clip_grad', type=float, default=3.0, help="""Maximal parameter
         gradient norm if using gradient clipping. Clipping with norm .3 ~ 1.0 can
         help optimization for larger ViT architectures. 0 for disabling.""")
-    parser.add_argument('--batch_size_per_gpu', default=64, type=int,
+    parser.add_argument('--batch_size_per_gpu', default=50, type=int,
         help='Per-GPU batch-size : number of distinct images loaded on one GPU.')
     parser.add_argument('--epochs', default=100, type=int, help='Number of epochs of training.')
     parser.add_argument('--freeze_last_layer', default=1, type=int, help="""Number of epochs
@@ -108,16 +110,16 @@ def get_args_parser():
     parser.add_argument('--drop_path_rate', type=float, default=0.1, help="stochastic depth rate")
 
     # Multi-crop parameters
-    parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
-        Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
-        recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
+    # parser.add_argument('--global_crops_scale', type=float, nargs='+', default=(0.4, 1.),
+    #     help="""Scale range of the cropped image before resizing, relatively to the origin image.
+    #     Used for large global view cropping. When disabling multi-crop (--local_crops_number 0), we
+    #     recommand using a wider range of scale ("--global_crops_scale 0.14 1." for example)""")
     parser.add_argument('--local_crops_number', type=int, default=8, help="""Number of small
         local views to generate. Set this parameter to 0 to disable multi-crop training.
         When disabling multi-crop we recommend to use "--global_crops_scale 0.14 1." """)
-    parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
-        help="""Scale range of the cropped image before resizing, relatively to the origin image.
-        Used for small local view cropping of multi-crop.""")
+    # parser.add_argument('--local_crops_scale', type=float, nargs='+', default=(0.05, 0.4),
+    #     help="""Scale range of the cropped image before resizing, relatively to the origin image.
+    #     Used for small local view cropping of multi-crop.""")
 
     # Misc
     parser.add_argument('--data_path', default='/path/to/imagenet/train/', type=str,
@@ -131,7 +133,7 @@ def get_args_parser():
     parser.add_argument("--local_rank", default=0, type=int, help="Please ignore and do not set this argument.")
     return parser
 
-#输入的是[256*384]特征
+#输入的是[5*384]特征
 def train_dino(args):
     utils.init_distributed_mode(args)
     utils.fix_random_seeds(args.seed)
@@ -140,14 +142,16 @@ def train_dino(args):
     cudnn.benchmark = True
 
     # ============ preparing data ... ============
-    transform = DataAugmentationDINO4K(
+    transform = ECGDataAugmentationDINO1K(
         args.local_crops_number
     )
     
-    # Using custom dataset for our [256 x 384] tensors
+    # Using custom dataset for our [5 x 384] tensors
     dataset = SeqDataset(dataroot=args.data_path, transform=transform)
     
     sampler = torch.utils.data.DistributedSampler(dataset, shuffle=True)
+
+    #每次返回的batch：每个batch包含64个样本，每个样本包含不同views，global views是(384，1，4)张量，local views是(384，1，2)张量
     data_loader = torch.utils.data.DataLoader(
         dataset,
         sampler=sampler,
@@ -156,7 +160,7 @@ def train_dino(args):
         pin_memory=True,
         drop_last=True, #如果一个 batch 不够 batch_size，就直接丢弃它
     )
-    print(f"Data loaded: there are {len(dataset)} images.")
+    print(f"Data loaded: there are {len(dataset)} images.") #500/64≈7个batch，每个epoch迭代7次（但看不完样本？）
 
     # ============ building student and teacher networks ... ============
     # we changed the name DeiT-S for ViT-S to avoid confusions
@@ -164,33 +168,35 @@ def train_dino(args):
     # if the network is a Vision Transformer (i.e. vit_tiny, vit_small, vit_base)
     if args.arch in vits.__dict__.keys():
         student = vits.__dict__[args.arch](
-            patch_size=args.patch_size,
+            slice_len=args.slice_len, #default=40
             drop_path_rate=args.drop_path_rate,  # stochastic depth
         )
-        teacher = vits.__dict__[args.arch](patch_size=args.patch_size)
+        teacher = vits.__dict__[args.arch](slice_len=args.slice_len)
         embed_dim = student.embed_dim
+
     # if the network is a XCiT
-    elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
-        student = torch.hub.load('facebookresearch/xcit:main', args.arch,
-                                 pretrained=False, drop_path_rate=args.drop_path_rate)
-        teacher = torch.hub.load('facebookresearch/xcit:main', args.arch, pretrained=False)
-        embed_dim = student.embed_dim
-    # otherwise, we check if the architecture is in torchvision models
-    elif args.arch in torchvision_models.__dict__.keys():
-        student = torchvision_models.__dict__[args.arch]()
-        teacher = torchvision_models.__dict__[args.arch]()
-        embed_dim = student.fc.weight.shape[1]
+    # elif args.arch in torch.hub.list("facebookresearch/xcit:main"):
+    #     student = torch.hub.load('facebookresearch/xcit:main', args.arch,
+    #                              pretrained=False, drop_path_rate=args.drop_path_rate)
+    #     teacher = torch.hub.load('facebookresearch/xcit:main', args.arch, pretrained=False)
+    #     embed_dim = student.embed_dim
+    # # otherwise, we check if the architecture is in torchvision models
+    # elif args.arch in torchvision_models.__dict__.keys():
+    #     student = torchvision_models.__dict__[args.arch]()
+    #     teacher = torchvision_models.__dict__[args.arch]()
+    #     embed_dim = student.fc.weight.shape[1]
+
     else:
-        print(f"Unknow architecture: {args.arch}")
+        print(f"Unknown architecture: {args.arch}")
 
     # multi-crop wrapper handles forward with inputs of different resolutions
-    student = utils.MultiCropWrapper(student, DINOHead(
+    student = ecg_utils.MultiCropWrapper(student, DINOHead(
         embed_dim,
         args.out_dim,
         use_bn=args.use_bn_in_head,
         norm_last_layer=args.norm_last_layer,
     ))
-    teacher = utils.MultiCropWrapper(
+    teacher = ecg_utils.MultiCropWrapper(
         teacher,
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head),
     )
@@ -317,7 +323,7 @@ def train_one_epoch(student, teacher, teacher_without_ddp, dino_loss, data_loade
     header = 'Epoch: [{}/{}]'.format(epoch, args.epochs)
     #在.log_every(data_loader, 10, header)出现报错：除0error，即len(data_loader)变成0
     #参数interable应该是data_loader输入的
-    for it, (images, _) in enumerate(metric_logger.log_every(data_loader, 10, header)):
+    for it, images in enumerate(metric_logger.log_every(data_loader, 10, header)):
         # update weight decay and learning rate according to their schedule
         it = len(data_loader) * epoch + it  # global training iteration
         for i, param_group in enumerate(optimizer.param_groups):
@@ -432,59 +438,78 @@ class DINOLoss(nn.Module):
         # ema update
         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
 
-### Custom Dataset Implemented to Load in [256-Length x 384-Dim] Tensors which correspond to extracted ViT-16 features for 4K x 4K patch
+### Custom Dataset Implemented to Load in [5-Length x 384-Dim] Tensors which correspond to extracted ViT-40 features for 1000 points
 #具体定义法：dataset = SeqDataset(dataroot=args.data_path, transform=transform)
 class SeqDataset(Dataset):
     def __init__(self, dataroot, transform):
         seq_list = os.listdir(dataroot)
-        self.seq_list = [os.path.join(dataroot, fname) for fname in seq_list] #每个 [256-Length x 384-Dim] 的路径？
-        self.transform = transform #数据增强后的crop list
+        self.seq_list = [os.path.join(dataroot, fname) for fname in seq_list] #每个 [5-Length x 384-Dim] 的路径
+        self.transform = transform #数据增强返回crop list的方法
         
     def __getitem__(self, index):
         seq = torch.load(self.seq_list[index])
-        label = torch.zeros(1,1)
-        return self.transform(seq), label
+        return self.transform(seq)
 
     def __len__(self):
         return len(self.seq_list)
 
-### Modified Data Augmentaton for DINO for 4K x 4K resolutions for performing local / global crops on features in image grid
-class DataAugmentationDINO4K(object):
+### Modified Data Augmentaton for DINO for 1K points for performing local / global crops
+class ECGDataAugmentationDINO1K(object):
+
+    """
+    输入: signal (5, 384) 表示5段patch特征。
+    增强：
+      - 50%概率打乱时间顺序；
+      - Global crop: (384,1,4)
+      - Local crops: (384,1,2)
+    """
+
     def __init__(self, local_crops_number):
-        flip = transforms.Compose([
-            transforms.RandomHorizontalFlip(p=0.5),
-        ])
-
-        # first global crop
-        self.global_transfo1 = transforms.Compose([
-            transforms.RandomCrop(14),
-            transforms.RandomHorizontalFlip(p=0.5),
-        ])
-        
-        # second global crop
-        self.global_transfo2 = transforms.Compose([
-            transforms.RandomCrop(14),
-            transforms.RandomHorizontalFlip(p=0.5),
-        ])
-        
-        # transformation for the local small crops
         self.local_crops_number = local_crops_number
-        self.local_transfo = transforms.Compose([
-            transforms.RandomCrop(6),
-            transforms.RandomHorizontalFlip(p=0.5),
-        ])
+        self.global_crop_len = 4
+        self.local_crop_len = 2
 
-    def __call__(self, image):
+    def shuffling(self, signal):
+        # 50%概率打乱时间片顺序
+        if torch.rand(1)  < 0.5:
+            perm = torch.randperm(signal.shape[0]) #torch.randperm 生成一个随机排列的索引
+            signal = signal[perm]
+        return signal
+
+    def slicing(self, signal, crop_len):
+        max_start = signal.shape[0] - crop_len
+        if max_start < 0:
+            raise ValueError(f"Cannot crop length {crop_len} from sequence of length {signal.shape[0]}")
+        start = random.randint(0, max_start)
+        return signal[start:start + crop_len]
+
+    def __call__(self, signal):
+        """
+        signal: Tensor of shape (5, 384)
+        return: list of cropped tensors:
+                2 global crops (384,1,4)
+                N local crops (384,1,2)
+        """
         crops = []
-        image = image.unfold(0, 16, 16).transpose(0,1)
-        crops.append(self.global_transfo1(image))
-        crops.append(self.global_transfo2(image))
+
+        #2个Global crops
+        for _ in range(2):
+            crop = self.slicing(signal, self.global_crop_len)  # (4, 384)
+            crop = self.shuffling(crop)
+            crop = crop.unsqueeze(0).permute(2, 0, 1)  #(4, 384)->(1,4,384)->(384,1,4)
+            crops.append(crop)
+
+        #默认8个Local crops（具体看输入）
         for _ in range(self.local_crops_number):
-            crops.append(self.local_transfo(image))
+            crop = self.slicing(signal, self.local_crop_len)  # (2, 384)
+            crop = self.shuffling(crop)
+            crop = crop.unsqueeze(0).permute(2, 0, 1)  #(2, 384)->(1,2,384)->(384,1,2)
+            crops.append(crop)
+
         return crops
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('DINO4K', parents=[get_args_parser()])
+    parser = argparse.ArgumentParser('DINO1K', parents=[get_args_parser()])
     args = parser.parse_args()
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     train_dino(args)

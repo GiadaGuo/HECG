@@ -5,10 +5,10 @@ import datetime
 import time
 import math
 import json
+import warnings
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
 import torch
 import torch.nn as nn
 import torch.distributed as dist
@@ -18,8 +18,8 @@ from torchvision import datasets, transforms
 from torchvision import models as torchvision_models
 
 import utils
-import vision_transformer as vits
-from vision_transformer import DINOHead
+import ecg_vit1 as vits
+from ecg_vit1 import DINOHead
 
 import math
 from functools import partial
@@ -186,17 +186,17 @@ class Block(nn.Module):
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
     def forward(self, x, return_attention=False):
-        y, attn = self.attn(self.norm1(x)) #y是attention分数(1,257,192)，attn是注意力权重矩阵
+        y, attn = self.attn(self.norm1(x)) #y是attention分数(100,5,192)，attn是注意力权重矩阵
         if return_attention:
             return attn
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
-        return x #(1,257,192)
+        return x #(100,5,192)
 
 
-class VisionTransformer4K(nn.Module):
-    """ Vision Transformer 4K """
-    def __init__(self, num_classes=0, img_size=[224], input_embed_dim=384, output_embed_dim = 192,
+class VisionTransformer1K(nn.Module):
+    """ Vision Transformer 1K """
+    def __init__(self, num_classes=0, series_len=[160], input_embed_dim=384, output_embed_dim = 192,
                  depth=12, num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, 
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=nn.LayerNorm, num_prototypes=64, **kwargs):
         super().__init__()
@@ -204,11 +204,11 @@ class VisionTransformer4K(nn.Module):
         self.num_features = self.embed_dim = embed_dim
         self.phi = nn.Sequential(*[nn.Linear(input_embed_dim, output_embed_dim), nn.GELU(), nn.Dropout(p=drop_rate)])
 
-        num_patches = int(img_size[0] // 16)**2
-        print("# of Patches:", num_patches)
+        num_slices = int(series_len[0] // 40) #比例一致故算出来还是4
+        print("# of Slices:", num_slices)
         
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim)) #(1,1,384)
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_slices + 1, embed_dim)) #(1,4+1,384)->(1,5,384)
         self.pos_drop = nn.Dropout(p=drop_rate)
 
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
@@ -235,54 +235,63 @@ class VisionTransformer4K(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def interpolate_pos_encoding(self, x, w, h):
-        npatch = x.shape[1] - 1
-        N = self.pos_embed.shape[1] - 1
-        if npatch == N and w == h:
-            return self.pos_embed
-        class_pos_embed = self.pos_embed[:, 0]
-        patch_pos_embed = self.pos_embed[:, 1:]
-        dim = x.shape[-1]
-        w0 = w // 1
-        h0 = h // 1
-        # we add a small number to avoid floating point error in the interpolation
-        # see discussion at https://github.com/facebookresearch/dino/issues/8
-        w0, h0 = w0 + 0.1, h0 + 0.1
-        patch_pos_embed = nn.functional.interpolate(
-            patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
-            scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
-            mode='bicubic',
-        )
-        assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
-        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
-        return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
+    # def interpolate_pos_encoding(self, x, w, h):
+    #     """
+    #     x:(100, 5, 192)
+    #     w:1
+    #     h:4
+    #     这里应该没有采样点不一致的问题了，是不是没有必要了
+    #     """
+    #
+    #     return self.pos_embed
+    #
+    #     nslice = x.shape[1] - 1 #nslice:4
+    #     N = self.pos_embed.shape[1] - 1 #N:4
+    #     if nslice == N:
+    #         return self.pos_embed
+    #     class_pos_embed = self.pos_embed[:, 0]
+    #     patch_pos_embed = self.pos_embed[:, 1:]
+    #     dim = x.shape[-1]
+    #     w0 = w // 1
+    #     h0 = h // 1
+    #     # we add a small number to avoid floating point error in the interpolation
+    #     # see discussion at https://github.com/facebookresearch/dino/issues/8
+    #     w0, h0 = w0 + 0.1, h0 + 0.1
+    #     patch_pos_embed = nn.functional.interpolate(
+    #         patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
+    #         scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
+    #         mode='bicubic',
+    #     )
+    #     assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
+    #     patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+    #     return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
     def prepare_tokens(self, x):
         #print('preparing tokens (after crop)', x.shape)
-        self.mpp_feature = x
-        B, embed_dim, w, h = x.shape #e.g.(1,384,16,16)
+        self.mpp_feature = x #输入维度（以teacher为例）
+        B, embed_dim, w, h = x.shape #按理说x应该是(100,384,1,4)
         #flatten(2, 3) :将从第 2 维到第 3 维的维度进行展平(w 和 h 两个维度合并成一个维度)
-        x = x.flatten(2, 3).transpose(1,2)  #e.g.(1,384,256)=> (1,256,384)
+        x = x.flatten(2, 3).transpose(1,2)  #e.g.(100,384,1，4)=>(100,384,4)=> (100,4,384)
 
-        x = self.phi(x) #(1, 256, 192)
+        x = self.phi(x) #(100, 4, 192)
 
 
         # add the [CLS] token to the embed patch tokens
-        cls_tokens = self.cls_token.expand(B, -1, -1) #(1, 1, 192)
-        x = torch.cat((cls_tokens, x), dim=1) #(1, 257, 192)
+        cls_tokens = self.cls_token.expand(B, -1, -1) #(100, 1, 192)
+        x = torch.cat((cls_tokens, x), dim=1) #(100, 5, 192)
 
         # add positional encoding to each token
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        x = x + self.pos_embed #原来是interpolate_pos_encoding(self, x, w, h)但好像不会有插值情况了
 
-        return self.pos_drop(x) #输出维度(1, 257, 192)
+        return self.pos_drop(x) #输出维度(100, 5, 192)
 
     def forward(self, x):
-        x = self.prepare_tokens(x)
+        x = self.prepare_tokens(x) #(100, 5, 192)
         for blk in self.blocks:
             x = blk(x)
-        x = self.norm(x) #(1,257,192)
+        x = self.norm(x) #(100,5,192)
         #选择了第0维度的所有；第1维的第一个元素；第2维（特征维度）的大小 192 保持不变
-        return x[:, 0] #(1,192)
+        return x[:, 0] #(100,192)
 
     def get_last_selfattention(self, x):
         x = self.prepare_tokens(x)
@@ -303,9 +312,9 @@ class VisionTransformer4K(nn.Module):
                 output.append(self.norm(x))
         return output
     
-def vit4k_xs(patch_size=16, **kwargs):
-    model = VisionTransformer4K(
-        patch_size=patch_size, input_embed_dim=384, output_embed_dim=192,
+def vit4k_xs(slice_len=40, **kwargs):
+    model = VisionTransformer1K(
+        slice_len=slice_len, input_embed_dim=384, output_embed_dim=192,
         depth=6, num_heads=6, mlp_ratio=4, 
         qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
     return model

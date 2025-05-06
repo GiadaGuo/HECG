@@ -47,7 +47,7 @@ class MultiCropWrapper(nn.Module):
     将所有输出特征连接起来，并在这些连接后的特征上运行头部（head）的前向传播
 
     实例化方法：
-    teacher = utils.MultiCropWrapper(
+    teacher = ecg_utils.MultiCropWrapper(
         teacher, #backbone
         DINOHead(embed_dim, args.out_dim, args.use_bn_in_head), #head
     )
