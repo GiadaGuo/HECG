@@ -34,7 +34,7 @@ torch.serialization.add_safe_globals([multiarray.scalar,np.dtype,np.dtypes.Float
 
 # Local Dependencies
 import ecg_vit1 as vits
-import ecg_vit2 as vits4k
+import ecg_vit2 as vits1k
 
 def get_vit200(pretrained_weights, arch='vit_small', device=torch.device('cuda:0')):
     r"""
@@ -74,29 +74,30 @@ def get_vit200(pretrained_weights, arch='vit_small', device=torch.device('cuda:0
     return model200
 
 
-def get_vit4k(pretrained_weights, arch='vit4k_xs', device=torch.device('cuda:1')):
+def get_vit1k(pretrained_weights, arch='vit1k_xs', device=torch.device('cuda:1')):
     r"""
-    Builds ViT-4K Model.
+    Builds ViT-1k Model.
     
     Args:
-    - pretrained_weights (str): Path to ViT-4K Model Checkpoint.
+    - pretrained_weights (str): Path to ViT-1k Model Checkpoint.
     - arch (str): Which model architecture.
     - device (torch): Torch device to save model.
     
     Returns:
-    - model256 (torch.nn): Initialized model.
+    - model1k (torch.nn): Initialized model.
     """
     
     checkpoint_key = 'teacher'
     device = torch.device("cpu")
-    model4k = vits4k.__dict__[arch](num_classes=0)
-    for p in model4k.parameters():
+    model1k = vits1k.__dict__[arch](num_classes=0)
+    for p in model1k.parameters():
         p.requires_grad = False
-    model4k.eval()
-    model4k.to(device)
+    model1k.eval()
+    model1k.to(device)
 
     if os.path.isfile(pretrained_weights):
-        state_dict = torch.load(pretrained_weights, map_location="cpu")
+        with torch.serialization.safe_globals([multiarray.scalar, np.dtype, np.dtypes.Float64DType, argparse.Namespace]):
+            state_dict = torch.load(pretrained_weights, map_location="cpu", weights_only=False)
         if checkpoint_key is not None and checkpoint_key in state_dict:
             print(f"Take key {checkpoint_key} in provided checkpoint dict")
             state_dict = state_dict[checkpoint_key]
@@ -104,10 +105,10 @@ def get_vit4k(pretrained_weights, arch='vit4k_xs', device=torch.device('cuda:1')
         state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
         # remove `backbone.` prefix induced by multicrop wrapper
         state_dict = {k.replace("backbone.", ""): v for k, v in state_dict.items()}
-        msg = model4k.load_state_dict(state_dict, strict=False)
+        msg = model1k.load_state_dict(state_dict, strict=False)
         print('Pretrained weights found at {} and loaded with msg: {}'.format(pretrained_weights, msg))
         
-    return model4k
+    return model1k
 
 
 def eval_transforms(signal):
@@ -137,22 +138,20 @@ def eval_transforms(signal):
 # 	return Image.fromarray(tensorbatch2im(img)[0])
 #
 #
-# def tensorbatch2im(input_image, imtype=np.uint8):
-#     r""""
-#     Converts a Tensor array into a numpy image array.
-#
-#     Args:
-#         - input_image (torch.Tensor): (B, C, W, H) Torch Tensor.
-#         - imtype (type): the desired type of the converted numpy array
-#
-#     Returns:
-#         - image_numpy (np.array): (B, W, H, C) Numpy Array.
-#     """
-#     if not isinstance(input_image, np.ndarray):
-#         image_numpy = input_image.cpu().float().numpy()  # convert it into a numpy array
-#         #if image_numpy.shape[0] == 1:  # grayscale to RGB
-#         #    image_numpy = np.tile(image_numpy, (3, 1, 1))
-#         image_numpy = (np.transpose(image_numpy, (0, 2, 3, 1)) + 1) / 2.0 * 255.0  # post-processing: tranpose and scaling
-#     else:  # if it is a numpy array, do nothing
-#         image_numpy = input_image
-#     return image_numpy.astype(imtype)
+def tensorbatch2im(input_signal, imtype=np.uint8):
+    r""""
+    Converts a Tensor array into a numpy series array.
+
+    Args:
+        - input_signal (torch.Tensor): (B, C, W, H) Torch Tensor.
+        - imtype (type): the desired type of the converted numpy array
+
+    Returns:
+        - signal_numpy (np.array): (B, W, H, C) Numpy Array.
+    """
+    if not isinstance(input_signal, np.ndarray):
+        signal_numpy = input_signal.cpu().float().numpy()  # convert it into a numpy array
+        signal_numpy = np.transpose(signal_numpy, (0, 2, 3, 1)) #e.g.(5,12,1,200)=>(5,1,200,12)
+    else:  # if it is a numpy array, do nothing
+        signal_numpy = input_signal
+    return signal_numpy.astype(imtype)

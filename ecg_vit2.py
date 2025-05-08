@@ -296,7 +296,7 @@ class VisionTransformer1K(nn.Module):
                 output.append(self.norm(x))
         return output
     
-def vit4k_xs(slice_len=40, **kwargs):
+def vit1k_xs(slice_len=40, **kwargs):
     model = VisionTransformer1K(
         slice_len=slice_len, input_embed_dim=384, output_embed_dim=192,
         depth=6, num_heads=6, mlp_ratio=4, 
