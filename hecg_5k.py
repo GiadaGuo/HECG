@@ -17,6 +17,7 @@ from tqdm import tqdm
 import torch
 import torch.multiprocessing
 import torch.nn as nn
+import torch.nn.functional as F
 
 from einops import rearrange, repeat
 torch.multiprocessing.set_sharing_strategy('file_system')
@@ -25,15 +26,16 @@ torch.multiprocessing.set_sharing_strategy('file_system')
 import ecg_vit1 as vits
 import ecg_vit2 as vits1k
 # from HECG_heatmap_utils import *
-from hecg_model_utils import get_vit200, get_vit1k,eval_transforms,tensorbatch2im
+from hecg_model_utils import *
 
 
-class HECG_1K(torch.nn.Module):
+class HECG_5K(torch.nn.Module):
 	"""
 	HECG Model (ViT-1K) for encoding ECG series (with 200 slice tokens), with 200 slice tokens
 	encoded via ViT-200 using 40 slice tokens.
 	"""
 	def __init__(self,
+				 size_arg = "small",
 		#这里本地文件太大传不上去只能用云盘的，等加载再改吧
 		model200_path: str = '../Checkpoints/vit200_small_dino.pth',
 		model1k_path: str = '../Checkpoints/vit1k_xs_dino.pth', 
@@ -55,26 +57,29 @@ class HECG_1K(torch.nn.Module):
 		self.model1k = get_vit1k(pretrained_weights=model1k_path).to(device1k)
 		self.device200 = device200
 		self.device1k = device1k
+
+		self.size_dict_path = {"small": [384, 192, 192], "big": [1024, 512, 384]}
+		size = self.size_dict_path[size_arg]
+
+		self.global_phi = nn.Sequential(nn.Linear(192, 192), nn.ReLU(), nn.Dropout(0.25))
+		self.global_transformer = nn.TransformerEncoder(  # WSI层次不用VIT
+			nn.TransformerEncoderLayer(
+				d_model=192, nhead=3, dim_feedforward=192, dropout=0.25, activation='relu'
+			),
+			num_layers=2
+		)
+		self.global_attn_pool = Attn_Net_Gated(L=size[1], D=size[1], dropout=0.25, n_classes=1)
+		self.global_rho = nn.Sequential(*[nn.Linear(size[1], size[1]), nn.ReLU(), nn.Dropout(0.25)])
 	
 	def forward(self, x):
 		"""
-		Forward pass of HECG (given an series tensor x), outputting the [CLS] token from ViT-1k.
+		Forward pass of HECG (given an series tensor x), outputting the [CLS] token from ViT-5k.
 		1. x is center-cropped(中间剪裁) such that the W / H is divisible by the slice token size in ViT-1k (e.g. - 200).
-		概括：中间裁剪 x → 确保尺寸能被 200 整除
-		这个功能暂时不用，默认输入都是5000采样点
-
 		2. x then gets unfolded into a "batch" of [200] series.
-		概括：切割 x → 变成多个 采样点200 的子序列
-
 		3. A pretrained ViT-200 model extracts the CLS token from each [200] series in the batch.
-		概括：ViT-200 处理子列 → 获取 [CLS]_200 特征
-
 		4. These batch-of-features are then reshaped into a 2D feature grid (of width "w_200" and height "h_200".)
-		概括：重新组织[CLS]_256特征 → 形成 2D 特征网格（增加虚拟维度w_200=1）
-
-
-		5. This feature grid is then used as the input to ViT-1k, outputting [CLS]_1k.
-		概括：ViT-1k 整合特征 → 得到最终 [CLS]_1k
+		5. This feature grid is then used as the input to ViT-1k, extracting [CLS]_1k.
+		6. outputting [CLS]_5k
 		
 		Args:
 			- x (torch.Tensor): [1 x C x 1 x H'] image tensor.
@@ -84,40 +89,34 @@ class HECG_1K(torch.nn.Module):
 			- features_cls1k (torch.Tensor): [1 x 192] cls token (d_1k = 192 by default).
 			输出：形状是 [1 × 192]，表示整个 x 的全局特征，192 维的1个向量
 		"""
-		batch_200, w_200, h_200 = self.prepare_ser_tensor(x)                    # 1. batch_200：[1 x 12 x 1 x H]=>e.g.[1 x 12 x 1 x 1000];h_200通常是5
+		batch_200, w_200, h_200 = self.prepare_ser_tensor(x)                    # 1. batch_200：[1 x 12 x 1 x H]=>e.g.[1 x 12 x 1 x 5000];h_200通常是25
 
-		batch_200 = batch_200.unfold(3, 200, 200)           # 2. [1, 12, 1, 5, 200]
-		batch_200 = rearrange(batch_200, 'b c w n h -> (b n) c w h')    # 2. [B x 12 x 1 x 200], where B = (1*w_200*h_200) 表示batchsize，成为batch_200.shape[0]
+		batch_200 = batch_200.unfold(3, 200, 200)           # 2. [1, 12, 1, 25, 200]
+		batch_200 = rearrange(batch_200, 'b c w n h -> (b n) c w h')    # 2. [B x 12 x 1 x 200], where B = (1*w_200*h_200) =25表示batchsize，成为batch_200.shape[0]
 
-		# 所有的B个slices被分成B/5个minibatches（每个里面有5个slices）
-		# 按minibatch进model(VIT_small)训练，得到的CLS添加进features_cls200列表
-		# input size: [5 x 12 x 1 x 200] （进模型后200采样点会被打散成5个40采样点的子列）
-		# output size: [5 x 384]（每个minibatch里有5个slices，每个slices的大小是200，最终都生成5个1*384的向量）
-		features_cls200 = []
-
-		# #B如果很大用minibatch
-		# for mini_bs in range(0, batch_200.shape[0], 5):                       # 3. B may be too large for ViT-200. We further take minibatches of 5.(每隔5取batchsize里的序号)
-		# 	minibatch_200 = batch_200[mini_bs:mini_bs+5].to(self.device200, non_blocking=True)
-		# 	#self.model200接受的输入维度： [B x 12 x 1 x 200]
-		# 	features_cls200.append(self.model200(minibatch_200).detach().cpu()) # 3. Extracting ViT-200 features from [256 x 3 x 256 x 256] image batches.
-		# 	#+3.提取后的特征被移动到 CPU 上，并从计算图中分离（detach）
-		#
-		# #torch.vstack:将 features_cls200 列表中的所有张量沿着第一个维度（即垂直方向）堆叠起来,把minibatches还原成B
-		# #把B/256个[5*384]堆叠——[B*384],B是最大的输入图像可以分成1*200的数量
-		# features_cls200 = torch.vstack(features_cls200)                         # 3. [B x 384], where 384 == dim of ViT-200 [ClS] token.
-
-		#B不大不用minibatch：B=5左右
+		#vit1:200-40
 		batch_200=batch_200.to(self.device200, non_blocking=True)
-		features_cls200 = self.model200(batch_200).detach().cpu()
+		features_cls200 = self.model200(batch_200).detach().cpu() # 3. [B x 384]=[25 x 384], where 384 == dim of ViT-200 [ClS] token.
 
 		#维度变换还原成最开始的2D输入形式 (1,C,W,H)——(1,384, w_200,h_200)，便于下一层输入
-		#过程：[B*384]→(w_200, h_200, 384)→交换0和1→(h_200, w_200, 384)→交换0和2→(384,w_200,h_200)→unsqueeze(dim=0)在第0维增加1个维度→(1,384,w_200,h_200)
-		features_cls200 = features_cls200.reshape(w_200, h_200, 384).transpose(0,1).transpose(0,2).unsqueeze(dim=0) 
+		#过程：(1,25,384)->(25,1,384)->(5,1,384,5)->transpose(1,2)->(5,384,1,5)
+		features_cls200 = features_cls200.reshape(1,25,384).transpose(0,1).unfold(0,5,5).transpose(1,2)
 
-		#【进入下一层】
-		features_cls200 = features_cls200.to(self.device1k, non_blocking=True)  # 4. [1 x 384 x w_200 x h_200]；non_blocking=True 可以让数据传输操作在后台进行，而不会阻塞当前线程
-		features_cls1k = self.model1k.forward(features_cls200)                  # 5. [1 x 192], where 192 == dim of ViT-1k [ClS] token.
-		return features_cls1k
+		#vit2:1000-200
+		features_cls200 = features_cls200.to(self.device1k, non_blocking=True)  # 4. [5 x 384 x 1 x 5]；non_blocking=True
+		features_cls1k = self.model1k.forward(features_cls200)                  # 5. [5 x 192], where 192 == dim of ViT-1k [ClS] token.
+
+		#finetuning
+		features_cls1k = self.global_phi(features_cls1k) #[5 x 192]
+		features_cls1k = self.global_transformer(features_cls1k.unsqueeze(1)).squeeze(1) #input[5 x 1 x 192]->output[1 x 192]
+		A_1k, features_cls1k = self.global_attn_pool(features_cls1k)
+		A_1k = torch.transpose(A_1k, 1, 0)
+		A_1k = F.softmax(A_1k, dim=1)
+		h_path = torch.mm(A_1k, features_cls1k)
+		features_cls5k = self.global_rho(h_path)
+
+
+		return features_cls5k
 	
 	
 	def forward_asset_dict(self, x: torch.Tensor):
@@ -167,7 +166,7 @@ class HECG_1K(torch.nn.Module):
 		Forward pass in hierarchical model with attention scores saved.
 		
 		Args:
-		- signal (PIL.Image):       ECG series with 1000 sampling points
+		- signal:       ECG series with 1000 sampling points
 		- model200 (torch.nn):      200-Level ViT
 		- model1k (torch.nn):       1000-Level ViT
 		- scale (int):              How much to scale the output image by (e.g. - scale=4 will resize signal to be 250)

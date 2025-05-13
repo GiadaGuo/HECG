@@ -30,7 +30,7 @@ import numpy as np
 import torch
 from torch import nn
 import torch.distributed as dist
-from PIL import ImageFilter, ImageOps
+
 
 
 
@@ -826,3 +826,35 @@ def multi_scale(samples, model):
     v /= 3
     v /= v.norm()
     return v
+
+
+"""
+Attention Network without Gating (2 fc layers)
+args:
+    L: input feature dimension
+    D: hidden layer dimension
+    dropout: whether to use dropout (p = 0.25)
+    n_classes: number of classes 
+"""
+
+
+class Attn_Net(nn.Module):
+
+    def __init__(self, L=1024, D=256, dropout=False, n_classes=1):
+        super(Attn_Net, self).__init__()
+        self.module = [
+            nn.Linear(L, D),
+            nn.Tanh()]
+
+        if dropout:
+            self.module.append(nn.Dropout(0.25))
+
+        self.module.append(nn.Linear(D, n_classes))
+
+        self.module = nn.Sequential(*self.module)
+
+    def forward(self, x):
+        return self.module(x), x  # N x n_classes
+
+
+
