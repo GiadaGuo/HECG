@@ -12,3 +12,4 @@ torchvision
 lifelines
 scikit-survival
 scikit-learn
+wfdb
