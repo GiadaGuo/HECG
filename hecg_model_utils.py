@@ -117,10 +117,13 @@ def eval_transforms(signal):
     """
     返回一个用于numpy数组预处理的转换管道
     后续可添加normalize操作，目前不考虑
+    input:(B,5000,12) 以5000采样点为例
+    output: (B,12,1,5000)
+    0626调整过，适用于用批次维度版本
     """
 
-    #转置为 (12, 200)=> 加一个伪维度，变成 (12, 1, 200)
-    eval_t = torch.tensor(signal.T, dtype=torch.float32).unsqueeze(1)
+    #转置为 (B,12, 200)=> 加一个伪维度，变成 (12, 1, 200)
+    eval_t = torch.tensor(signal.transpose(0, 2, 1), dtype=torch.float32).unsqueeze(2)
 
     return eval_t
 
@@ -181,7 +184,7 @@ class Attn_Net_Gated(nn.Module):
         """
         super(Attn_Net_Gated, self).__init__()
         self.attention_a = [
-            nn.Linear(L, D),
+            nn.Linear(L, D),     #输入：L=192，D=192
             nn.Tanh()]
 
         self.attention_b = [nn.Linear(L, D), nn.Sigmoid()]
@@ -194,10 +197,12 @@ class Attn_Net_Gated(nn.Module):
         self.attention_c = nn.Linear(D, n_classes)
 
     def forward(self, x):
-        a = self.attention_a(x)
-        b = self.attention_b(x)
-        A = a.mul(b)
-        A = self.attention_c(A)  # N x n_classes
+        #e.g. x维度：[Bx 5 x 192]
+        a = self.attention_a(x)  # [Bx 5 x 192]
+        b = self.attention_b(x)  # [Bx 5 x 192]
+        A = a.mul(b) # [Bx 5 x 192]
+        A = self.attention_c(A)  # [Bx 5 x n_classes]
+        A = A.squeeze(-1) # [Bx 5 ]
         return A, x
 
 
