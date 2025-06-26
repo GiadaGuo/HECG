@@ -59,7 +59,7 @@ class Extract_5K(torch.nn.Module):
 		self.device1k = device1k
 
 		self.size_dict_path = {"small": [384, 192, 192], "big": [1024, 512, 384]}
-		size = self.size_dict_path[size_arg]
+		self.size = self.size_dict_path[size_arg]
 
 		self.global_phi = nn.Sequential(nn.Linear(192, 192), nn.ReLU(), nn.Dropout(0.25))
 		self.global_transformer = nn.TransformerEncoder(  # WSI层次不用VIT
@@ -68,8 +68,8 @@ class Extract_5K(torch.nn.Module):
 			),
 			num_layers=2
 		)
-		self.global_attn_pool = Attn_Net_Gated(L=size[1], D=size[1], dropout=0.25, n_classes=1)
-		self.global_rho = nn.Sequential(*[nn.Linear(size[1], size[1]), nn.ReLU(), nn.Dropout(0.25)])
+		self.global_attn_pool = Attn_Net_Gated(L=self.size[1], D=self.size[1], dropout=0.25, n_classes=1)
+		self.global_rho = nn.Sequential(*[nn.Linear(self.size[1], self.size[1]), nn.ReLU(), nn.Dropout(0.25)])
 	
 	def forward(self, x):
 		"""
@@ -82,15 +82,16 @@ class Extract_5K(torch.nn.Module):
 		6. outputting [CLS]_5k
 		
 		Args:
-			- x (torch.Tensor): [1 x C x 1 x H'] tensor.
-			输入：形状是 [1 × C × 1 × H']，即 1 张 12导联采样点H的心电图样本，经过裁剪后的大小是 1 × H'
+			- x (torch.Tensor): [B x C x 1 x H'] tensor.
+			输入：形状是 [B × C × 1 × H']，即 1 张 12导联采样点H的心电图样本，经过裁剪后的大小是 1 × H'
 		
 		Return:
 			- features_cls1k (torch.Tensor): [B x 192] cls token (d_1k = 192 by default).
-			输出：形状是 [1 × 192]，表示整个 x 的全局特征，192 维的1个向量
+			输出：形状是 [B × 192]，表示整个 x 的全局特征，192 维的1个向量
 		"""
 		batch_200, w_200, h_200 = self.prepare_ser_tensor(x)                    # 1. batch_200：[B x 12 x 1 x H]=>e.g.[B x 12 x 1 x 5000];h_200通常是25
 		B = batch_200.shape[0]
+
 
 		batch_200 = batch_200.unfold(3, 200, 200)           # 2. [B, 12, 1, 25, 200]
 		batch_200 = rearrange(batch_200, 'b c w n h -> (b n) c w h')    # 2. [B' x 12 x 1 x 200], where B' = B*(1*w_200*h_200) =B*25
