@@ -122,27 +122,13 @@ def eval_transforms(signal):
     0626调整过，适用于用批次维度版本
     """
 
-    #转置为 (B,12, 200)=> 加一个伪维度，变成 (12, 1, 200)
-    eval_t = torch.tensor(signal.transpose(0, 2, 1), dtype=torch.float32).unsqueeze(2)
+    #转换成张量=>转置为 (B,12, 200)=> 加一个伪维度，变成 (B,12, 1, 200)
+    eval_t = torch.tensor(signal, dtype=torch.float32).contiguous().permute(0, 2, 1).unsqueeze(2)
 
     return eval_t
 
 
-# def roll_batch2img(batch: torch.Tensor, w: int, h: int, patch_size=256):
-# 	"""
-# 	Rolls an image tensor batch (batch of [256 x 256] images) into a [W x H] Pil.Image object.
-#
-# 	Args:
-# 		batch (torch.Tensor): [B x 3 x 256 x 256] image tensor batch.
-#
-# 	Return:
-# 		Image.PIL: [W x H X 3] Image.
-# 	"""
-# 	batch = batch.reshape(w, h, 3, patch_size, patch_size)
-# 	img = rearrange(batch, 'p1 p2 c w h-> c (p1 w) (p2 h)').unsqueeze(dim=0)
-# 	return Image.fromarray(tensorbatch2im(img)[0])
-#
-#
+
 def tensorbatch2im(input_signal, imtype=np.uint8):
     r""""
     Converts a Tensor array into a numpy series array.
@@ -155,8 +141,9 @@ def tensorbatch2im(input_signal, imtype=np.uint8):
         - signal_numpy (np.array): (B, W, H, C) Numpy Array.
     """
     if not isinstance(input_signal, np.ndarray):
+        input_signal = input_signal.squeeze(2) # (B, C, 1, H) -> (B, C, H)
         signal_numpy = input_signal.cpu().float().numpy()  # convert it into a numpy array
-        signal_numpy = np.transpose(signal_numpy, (0, 2, 3, 1)) #e.g.(5,12,1,200)=>(5,1,200,12)
+        signal_numpy = np.transpose(signal_numpy, (0, 2, 1)) #e.g.(5,12,200)=>(5,200,12)
     else:  # if it is a numpy array, do nothing
         signal_numpy = input_signal
     return signal_numpy.astype(imtype)
