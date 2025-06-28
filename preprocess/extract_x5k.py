@@ -23,10 +23,10 @@ from einops import rearrange, repeat
 torch.multiprocessing.set_sharing_strategy('file_system')
 
 # Local Dependencies
-import ecg_vit1 as vits
-import ecg_vit2 as vits1k
+import HECG.ecg_vit1 as vits
+import HECG.ecg_vit2 as vits1k
 # from HECG_heatmap_utils import *
-from hecg_model_utils import *
+from HECG.hecg_model_utils import *
 
 
 class Extract_5K(torch.nn.Module):
@@ -171,191 +171,50 @@ class Extract_5K(torch.nn.Module):
 		return asset_dict
 
 
-	def _get_signal_attention_scores(self, signal, scale=1):
+	def _get_signal_attention_scores(self, signal):
 		r"""
 		Forward pass in hierarchical model with attention scores saved.
 		
 		Args:
-		- signal:       ECG series with 1000 sampling points
+		- signal:       ECG series with 1000 sampling points，dim=(B,1000,12)
 		- model200 (torch.nn):      200-Level ViT
 		- model1k (torch.nn):       1000-Level ViT
-		- scale (int):              How much to scale the output image by (e.g. - scale=4 will resize signal to be 250)
 		
 		Returns:
-		- np.array: [5, 1, 200/scale, 12] np.array sequence of image slices from the 1000 sampling points series.
+		- np.array: [5, 1, 200/scale, 12] np.array sequence from the 1000 sampling points series.
 		- attention_200 (torch.Tensor): [5, 1, 200/scale, 12] torch.Tensor sequence of attention maps for 200-sized slices.
 		- attention_1k (torch.Tensor): [1, 1, 1000/scale, 12] torch.Tensor sequence of attention maps for 1k-sized series.
 		"""
 
-		x = eval_transforms(signal).unsqueeze(dim=0)
+		x = eval_transforms(signal) # (B,1000,12)-> (B,12,1,1000)
 
-		batch_200, w_200, h_200 = self.prepare_ser_tensor(x)
-		batch_200 = batch_200.unfold(3, 200, 200)
-		batch_200 = rearrange(batch_200, 'b c w n h -> (b n) c w h')
-		batch_200 = batch_200.to(self.device200, non_blocking=True)
-		features_cls200 = self.model200(batch_200)
+		batch_200, w_200, h_200 = self.prepare_ser_tensor(x) # batch_200==(B,12,1,1000),w_200==1, h_200==5
+		B = batch_200.shape[0]
 
-		attention_200 = self.model200.get_last_selfattention(batch_200) #(B,num_heads,特征数,特征数)=>(5,num_heads,6,6)
-		nh = attention_200.shape[1] # number of head
-		attention_200 = attention_200[:, :, 0, 1:].reshape(5, nh, -1) # [CLS] token 到每个 patch token 的注意力值:(5,nh,5)->(5,nh,5)
-		attention_200 = attention_200.reshape(w_200*h_200, nh, 1, 5) #(5,nh,5)->(5,nh,1,5)
-		attention_200 = nn.functional.interpolate(attention_200, scale_factor=int(40/scale), mode="nearest").cpu().numpy()
+		batch_200 = batch_200.unfold(3, 200, 200) #(B,12,1,5,200)
+		batch_200 = rearrange(batch_200, 'b c w n h -> (b n) c w h') #(B,12,1,5,200)->(B*5,12,1,200)
+		batch_200 = batch_200.to(self.device200, non_blocking=True) # (B*5,12,1,200)
+		features_cls200 = self.model200(batch_200) #(B*5,384)
 
-		features_grid200 = features_cls200.reshape(w_200, h_200, 384).transpose(0,1).transpose(0,2).unsqueeze(dim=0)
+		#40采样点token间注意力，[cls]代表200采样点token=>200采样点中哪段40采样点最“重要”
+		attention_200 = self.model200.get_last_selfattention(batch_200) #(B*5,num_heads,6,6)
+		nh = attention_200.shape[1] # number of head==6
+		attention_200 = attention_200[:, :, 0, 1:].reshape(B*h_200, nh, -1) # [CLS] token 到每个 slice token 的注意力值:(B*5,nh,5)->(B*5,nh,5)
+		attention_200 = attention_200.cpu().numpy()
+
+
+
+		features_grid200 = features_cls200.reshape(B, h_200, 384).unfold(1,5,5).reshape(B,384,1,5) # (B,384,1,5)
 		features_grid200 = features_grid200.to(self.device1k, non_blocking=True)
 		features_cls1k = self.model1k.forward(features_grid200).detach().cpu()
 
-		attention_1k = self.model1k.get_last_selfattention(features_grid200) #(1,nh,6,6)
+		attention_1k = self.model1k.get_last_selfattention(features_grid200) #(B,nh,6,6)
 		nh = attention_1k.shape[1] # number of head
-		attention_1k = attention_1k[0, :, 0, 1:].reshape(nh, -1) #(nh,5)
-		attention_1k = attention_1k.reshape(nh, w_200, h_200) #(nh,1,5)
-		attention_1k = nn.functional.interpolate(attention_1k.unsqueeze(0), scale_factor=int(200/scale), mode="nearest")[0].cpu().numpy()
+		attention_1k = attention_1k[0, :, 0, 1:].reshape(B,nh, -1) #(B,nh,5)
+		attention_1k = attention_1k.cpu().numpy()
 
-		if scale != 1:
-			batch_200 = nn.functional.interpolate(batch_200, scale_factor=(1/scale), mode="nearest")
+		return tensorbatch2im(batch_200), attention_200, attention_1k #(B*5,200,12), (B*5,nh,5),(B,nh,5)
 
-		return tensorbatch2im(batch_200), attention_200, attention_1k
-
-
-	# def get_region_attention_heatmaps(self, x, offset=128, scale=4, alpha=0.5, cmap = cmap_map(lambda x: x/2 + 0.5, matplotlib.cm.jet), threshold=None):
-	# 	r"""
-	# 	Creates hierarchical heatmaps (Raw H&E + ViT-200 + ViT-1k + Blended Heatmaps saved individually).
-	#
-	# 	Args:
-	# 	- region (PIL.Image):       4096 x 4096 Image
-	# 	- model200 (torch.nn):      256-Level ViT
-	# 	- model1k (torch.nn):       4096-Level ViT
-	# 	- output_dir (str):         Save directory / subdirectory
-	# 	- fname (str):              Naming structure of files
-	# 	- offset (int):             How much to offset (from top-left corner with zero-padding) the region by for blending
-	# 	- scale (int):              How much to scale the output image by
-	# 	- alpha (float):            Image blending factor for cv2.addWeighted
-	# 	- cmap (matplotlib.pyplot): Colormap for creating heatmaps
-	#
-	# 	Returns:
-	# 	- None
-	# 	"""
-	# 	region = Image.fromarray(tensorbatch2im(x)[0])
-	# 	w, h = region.size
-	#
-	# 	region2 = add_margin(region.crop((128,128,w,h)),
-	# 					 top=0, left=0, bottom=128, right=128, color=(255,255,255))
-	# 	region3 = add_margin(region.crop((128*2,128*2,w,h)),
-	# 					 top=0, left=0, bottom=128*2, right=128*2, color=(255,255,255))
-	# 	region4 = add_margin(region.crop((128*3,128*3,w,h)),
-	# 					 top=0, left=0, bottom=128*4, right=128*4, color=(255,255,255))
-	#
-	# 	b256_1, a256_1, a1k_1 = self._get_region_attention_scores(region, scale)
-	# 	b256_2, a256_2, a1k_2 = self._get_region_attention_scores(region, scale)
-	# 	b256_3, a256_3, a1k_3 = self._get_region_attention_scores(region, scale)
-	# 	b256_4, a256_4, a1k_4 = self._get_region_attention_scores(region, scale)
-	# 	offset_2 = (offset*1)//scale
-	# 	offset_3 = (offset*2)//scale
-	# 	offset_4 = (offset*3)//scale
-	# 	w_s, h_s = w//scale, h//scale
-	# 	w_200, h_200 = w//256, h//256
-	# 	save_region = np.array(region.resize((w_s, h_s)))
-	#
-	# 	if threshold != None:
-	# 		for i in range(6):
-	# 			score256_1 = concat_scores256(a256_1[:,i,:,:], w_200, h_200, size=(w_s//w_200,h_s//h_200))
-	# 			score256_2 = concat_scores256(a256_2[:,i,:,:], w_200, h_200, size=(w_s//w_200,h_s//h_200))
-	# 			new_score256_2 = np.zeros_like(score256_2)
-	# 			new_score256_2[offset_2:w_s, offset_2:h_s] = score256_2[:(w_s-offset_2), :(h_s-offset_2)]
-	# 			overlay256 = np.ones_like(score256_2)*100
-	# 			overlay256[offset_2:w_s, offset_2:h_s] += 100
-	# 			score256 = (score256_1+new_score256_2)/overlay256
-	#
-	# 			mask256 = score256.copy()
-	# 			mask256[mask256 < threshold] = 0
-	# 			mask256[mask256 > threshold] = 0.95
-	#
-	# 			color_block256 = (cmap(mask256)*255)[:,:,:3].astype(np.uint8)
-	# 			region256_hm = cv2.addWeighted(color_block256, alpha, save_region.copy(), 1-alpha, 0, save_region.copy())
-	# 			region256_hm[mask256==0] = 0
-	# 			img_inverse = save_region.copy()
-	# 			img_inverse[mask256 == 0.95] = 0
-	# 			Image.fromarray(region256_hm+img_inverse).save(os.path.join(output_dir, '%s_256th[%d].png' % (fname, i)))
-	#
-	# 	if False:
-	# 		for j in range(6):
-	# 			score1k_1 = concat_scores1k(a1k_1[j], size=(h_s,w_s))
-	# 			score1k = score1k_1 / 100
-	# 			color_block1k = (cmap(score1k)*255)[:,:,:3].astype(np.uint8)
-	# 			region1k_hm = cv2.addWeighted(color_block1k, alpha, save_region.copy(), 1-alpha, 0, save_region.copy())
-	# 			Image.fromarray(region1k_hm).save(os.path.join(output_dir, '%s_1k[%s].png' % (fname, j)))
-	#
-	# 	hm1k, hm256, hm1k_256 = [], [], []
-	# 	for j in range(6):
-	# 		score1k_1 = concat_scores1k(a1k_1[j], size=(h_s,w_s))
-	# 		score1k_2 = concat_scores1k(a1k_2[j], size=(h_s,w_s))
-	# 		score1k_3 = concat_scores1k(a1k_3[j], size=(h_s,w_s))
-	# 		score1k_4 = concat_scores1k(a1k_4[j], size=(h_s,w_s))
-	# 		new_score1k_2 = np.zeros_like(score1k_2)
-	# 		new_score1k_2[offset_2:h_s, offset_2:w_s] = score1k_2[:(h_s-offset_2), :(w_s-offset_2)]
-	# 		new_score1k_3 = np.zeros_like(score1k_3)
-	# 		new_score1k_3[offset_3:h_s, offset_3:w_s] = score1k_3[:(h_s-offset_3), :(w_s-offset_3)]
-	# 		new_score1k_4 = np.zeros_like(score1k_4)
-	# 		new_score1k_4[offset_4:h_s, offset_4:w_s] = score1k_4[:(h_s-offset_4), :(w_s-offset_4)]
-	#
-	# 		overlay1k = np.ones_like(score1k_2)*100
-	# 		overlay1k[offset_2:h_s, offset_2:w_s] += 100
-	# 		overlay1k[offset_3:h_s, offset_3:w_s] += 100
-	# 		overlay1k[offset_4:h_s, offset_4:w_s] += 100
-	# 		score1k = (score1k_1+new_score1k_2+new_score1k_3+new_score1k_4)/overlay1k
-	#
-	# 		color_block1k = (cmap(score1k)*255)[:,:,:3].astype(np.uint8)
-	# 		region1k_hm = cv2.addWeighted(color_block1k, alpha, save_region.copy(), 1-alpha, 0, save_region.copy())
-	# 		hm1k.append(Image.fromarray(region1k_hm))
-	#
-	#
-	# 	for i in range(6):
-	# 		score256_1 = concat_scores256(a256_1[:,i,:,:], h_200, w_200, size=(256, 256))
-	# 		score256_2 = concat_scores256(a256_2[:,i,:,:], h_200, w_200, size=(256, 256))
-	# 		new_score256_2 = np.zeros_like(score256_2)
-	# 		new_score256_2[offset_2:h_s, offset_2:w_s] = score256_2[:(h_s-offset_2), :(w_s-offset_2)]
-	# 		overlay256 = np.ones_like(score256_2)*100
-	# 		overlay256[offset_2:h_s, offset_2:w_s] += 100
-	# 		score256 = (score256_1+new_score256_2)/overlay256
-	# 		color_block256 = (cmap(score256)*255)[:,:,:3].astype(np.uint8)
-	# 		region256_hm = cv2.addWeighted(color_block256, alpha, save_region.copy(), 1-alpha, 0, save_region.copy())
-	# 		hm256.append(Image.fromarray(region256_hm))
-	#
-	# 	for j in range(6):
-	# 		score1k_1 = concat_scores1k(a1k_1[j], size=(h_s,w_s))
-	# 		score1k_2 = concat_scores1k(a1k_2[j], size=(h_s,w_s))
-	# 		score1k_3 = concat_scores1k(a1k_3[j], size=(h_s,w_s))
-	# 		score1k_4 = concat_scores1k(a1k_4[j], size=(h_s,w_s))
-	#
-	# 		new_score1k_2 = np.zeros_like(score1k_2)
-	# 		new_score1k_2[offset_2:h_s, offset_2:w_s] = score1k_2[:(h_s-offset_2), :(w_s-offset_2)]
-	# 		new_score1k_3 = np.zeros_like(score1k_3)
-	# 		new_score1k_3[offset_3:h_s, offset_3:w_s] = score1k_3[:(h_s-offset_3), :(w_s-offset_3)]
-	# 		new_score1k_4 = np.zeros_like(score1k_4)
-	# 		new_score1k_4[offset_4:h_s, offset_4:w_s] = score1k_4[:(h_s-offset_4), :(w_s-offset_4)]
-	#
-	# 		overlay1k = np.ones_like(score1k_2)*100
-	# 		overlay1k[offset_2:h_s, offset_2:w_s] += 100
-	# 		overlay1k[offset_3:h_s, offset_3:w_s] += 100
-	# 		overlay1k[offset_4:h_s, offset_4:w_s] += 100
-	# 		score1k = (score1k_1+new_score1k_2+new_score1k_3+new_score1k_4)/overlay1k
-	#
-	# 		for i in range(6):
-	# 			score256_1 = concat_scores256(a256_1[:,i,:,:], h_200, w_200, size=(256, 256))
-	# 			score256_2 = concat_scores256(a256_2[:,i,:,:], h_200, w_200, size=(256, 256))
-	# 			new_score256_2 = np.zeros_like(score256_2)
-	# 			new_score256_2[offset_2:h_s, offset_2:w_s] = score256_2[:(h_s-offset_2), :(w_s-offset_2)]
-	# 			overlay256 = np.ones_like(score256_2)*100
-	# 			overlay256[offset_2:h_s, offset_2:w_s] += 100
-	# 			score256 = (score256_1+new_score256_2)/overlay256
-	#
-	# 			factorize = lambda data: (data - np.min(data)) / (np.max(data) - np.min(data))
-	# 			score = (score1k*overlay1k+score256*overlay256)/(overlay1k+overlay256) #factorize(score256*score1k)
-	# 			color_block = (cmap(score)*255)[:,:,:3].astype(np.uint8)
-	# 			region1k_256_hm = cv2.addWeighted(color_block, alpha, save_region.copy(), 1-alpha, 0, save_region.copy())
-	# 			hm1k_256.append(Image.fromarray(region1k_256_hm))
-	#
-	# 	return hm1k, hm256, hm1k_256
 
 
 	def prepare_ser_tensor(self, ser: torch.Tensor, slice_len=200):
